@@ -3,7 +3,7 @@
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// ==== Chân Encoder ====
+// ==== Encoder ====
 #define ENCODER_A 26
 #define ENCODER_B 25
 #define ENCODER_B_A 14
@@ -17,7 +17,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 #define MOTOR_B_IN1 21
 #define MOTOR_B_IN2 22
 
-// ==== Nút nhấn ====
+// ==== Buttons ====
 #define BUTTON_P1 4
 #define BUTTON_P2 0
 #define BUTTON_P3 33
@@ -27,21 +27,18 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 #define TRIG_PIN 15
 #define ECHO_PIN 27
 
-// ==== PID Bánh A ====
+// ==== PID Params ====
 float KpA = 0.0001, KiA = 0.05, KdA = 0.001;
 float lastErrorA = 0, integralA = 0;
 
-// ==== PID Bánh B ====
 float KpB = 0.0001, KiB = 0.05, KdB = 0.001;
 float lastErrorB = 0, integralB = 0;
 
-// ==== Setpoint ====
 float setpoint = 0.0;
 
 // ==== Fuzzy ====
 float targetDistance = 20;
 bool stopMotorInFuzzy = false;
-float lastE = 0;
 
 // ==== Encoder ====
 volatile int encoderCount = 0;
@@ -51,13 +48,13 @@ float encoder_resolution = 96;
 float gear_ratio = 1.0;
 float expectedPulses = encoder_resolution * gear_ratio;
 
-// ==== Thời gian & Mode ====
+// ==== Timing ====
 unsigned long lastTime = 0;
 unsigned long lastButtonTime = 0;
 const unsigned long debounceDelay = 200;
 int mode = 1;
 
-// ==== ISR encoder ====
+// ==== Encoder ISR ====
 void IRAM_ATTR readEncoder() {
   int stateA = digitalRead(ENCODER_A);
   int stateB = digitalRead(ENCODER_B);
@@ -72,7 +69,7 @@ void IRAM_ATTR readEncoderB() {
   lastStateBB = stateB;
 }
 
-// ==== Đọc HC-SR04 ====
+// ==== Read Distance ====
 long readDistanceCM() {
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
@@ -84,7 +81,7 @@ long readDistanceCM() {
   return constrain(distance, 0, 500);
 }
 
-// ==== Điều khiển PWM ====
+// ==== Motor PWM ====
 void setMotorPWM(int pwmA, int pwmB) {
   bool forwardA = pwmA >= 0;
   bool forwardB = pwmB >= 0;
@@ -96,29 +93,6 @@ void setMotorPWM(int pwmA, int pwmB) {
   digitalWrite(MOTOR_B_IN1, !forwardB);
   digitalWrite(MOTOR_B_IN2, forwardB);
   analogWrite(MOTOR_B_PWM, abs(pwmB));
-}
-
-// ==== Điều khiển mờ ====
-int fuzzyControl(float e, float de) {
-  if (e < -10) { // Rất gần
-    if (de < -2) return 255;       // Tiến nhanh
-    else if (de <= 2) return 150;  // Tiến chậm
-    else return 0;                 // Dừng
-  } else if (e < -5) { // Gần
-    if (de < -2) return 255;
-    else if (de <= 2) return 150;
-    else return 0;
-  } else if (e <= 5) { // Đúng khoảng
-    return 0;
-  } else if (e <= 10) { // Xa
-    if (de < -2) return 0;
-    else if (de <= 2) return -150;
-    else return -255;
-  } else { // Rất xa
-    if (de < -2) return 0;
-    else if (de <= 2) return -150;
-    else return -255;
-  }
 }
 
 void setup() {
@@ -153,6 +127,9 @@ void setup() {
   pinMode(ECHO_PIN, INPUT);
 
   lastTime = millis();
+
+  // Gửi dòng tiêu đề cho Python
+  Serial.println("errorA,errorB,errorDistance");
 }
 
 void loop() {
@@ -200,33 +177,43 @@ void loop() {
       float errorA = setpoint - rpmA;
       integralA += errorA * deltaTime;
       float derivativeA = (errorA - lastErrorA) / deltaTime;
-      float outputA = (KpA * errorA + KiA * integralA + KdA * derivativeA);
+      float outputA = KpA * errorA + KiA * integralA + KdA * derivativeA;
       lastErrorA = errorA;
 
       float errorB = setpoint - rpmB;
       integralB += errorB * deltaTime;
       float derivativeB = (errorB - lastErrorB) / deltaTime;
-      float outputB = (KpB * errorB + KiB * integralB + KdB * derivativeB);
+      float outputB = KpB * errorB + KiB * integralB + KdB * derivativeB;
       lastErrorB = errorB;
 
       pwmA = constrain(outputA, -255, 255);
       pwmB = constrain(outputB, -255, 255);
-    } else {
-      if (stopMotorInFuzzy) {
-        pwmA = pwmB = 0;
-      } else {
-        float currentDistance = readDistanceCM();
-        float e = currentDistance - targetDistance;
-        float de = e - lastE;
-        lastE = e;
 
-        int pwm = fuzzyControl(e, de);
-        pwmA = pwmB = constrain(-pwm, -255, 255);
+      // Gửi dữ liệu PID
+      Serial.print(errorA);
+      Serial.print(",");
+      Serial.print(errorB);
+      Serial.println(",");
+    } else {
+      float currentDistance = readDistanceCM();
+      float errorDistance = currentDistance - targetDistance;
+
+      if (stopMotorInFuzzy) {
+        pwmA = 0;
+        pwmB = 0;
+      } else {
+        pwmA = pwmB = constrain(errorDistance * 10.0, -255, 255);
       }
+
+      // Gửi dữ liệu Fuzzy
+      Serial.print(",");
+      Serial.print(",");
+      Serial.println(errorDistance);
     }
 
     setMotorPWM(pwmA, pwmB);
 
+    // LCD hiển thị
     lcd.clear();
     lcd.setCursor(0, 0);
     if (mode == 1) {
